@@ -1,21 +1,37 @@
-# Install deps if needed
-# !pip install requests pandas
+# !pip install requests pandas spacy pycountry
+# !python -m spacy download en_core_web_sm
 
-import os
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
+import spacy
+import pycountry
 
-API_KEY = "YOUR_API_KEY"  # replace
+nlp = spacy.load("en_core_web_sm")
+
+API_KEY = "YOUR_API_KEY"
 BASE_URL = "https://newsapi.org/v2/everything"
 
-# MSF countries (sample)
-countries = [
-    "Sudan", "Yemen", "Syria", "Afghanistan", "Haiti",
-    "DR Congo", "Ethiopia", "South Sudan", "Ukraine"
-]
+MSF_COUNTRIES = {
+    "Afghanistan", "Bangladesh", "Burundi", "Central African Republic",
+    "Chad", "Democratic Republic of the Congo", "Ethiopia",
+    "Haiti", "Iraq", "Lebanon", "Mali", "Myanmar", "Niger", "Nigeria",
+    "Palestine", "Somalia", "South Sudan", "Sudan", "Syria", "Ukraine",
+    "Yemen"
+}
 
-query = " OR ".join(countries) + " AND (health OR hospital OR conflict OR humanitarian)"
+COUNTRY_ALIASES = {
+    "DR Congo": "Democratic Republic of the Congo",
+    "DRC": "Democratic Republic of the Congo",
+    "Congo": "Democratic Republic of the Congo",
+    "Gaza": "Palestine",
+    "West Bank": "Palestine",
+}
+
+query = """
+(humanitarian OR medical OR hospital OR disease OR outbreak OR vaccine OR malnutrition
+OR refugee OR displacement OR conflict OR war OR violence OR crisis)
+"""
 
 params = {
     "q": query,
@@ -23,49 +39,96 @@ params = {
     "sortBy": "publishedAt",
     "from": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
     "apiKey": API_KEY,
-    "pageSize": 50
+    "pageSize": 50,
 }
 
 response = requests.get(BASE_URL, params=params)
+response.raise_for_status()
+
 articles = response.json().get("articles", [])
 
 df = pd.DataFrame(articles)
-df = df[["source", "author", "title", "description", "url", "publishedAt"]]
 
-# flatten source
-df["source"] = df["source"].apply(lambda x: x["name"] if isinstance(x, dict) else x)
+df = df[["source", "author", "title", "description", "url", "publishedAt"]].copy()
+
+df["source"] = df["source"].apply(
+    lambda x: x["name"] if isinstance(x, dict) else x
+)
+
+df["text"] = df["title"].fillna("") + " " + df["description"].fillna("")
+
 
 def classify(text):
     text = str(text).lower()
 
     if any(k in text for k in ["war", "conflict", "violence", "attack"]):
         return "Conflict"
-    elif any(k in text for k in ["hospital", "disease", "health", "outbreak"]):
+    if any(k in text for k in ["hospital", "disease", "health", "outbreak", "vaccine"]):
         return "Health"
-    elif any(k in text for k in ["flood", "earthquake", "disaster"]):
+    if any(k in text for k in ["flood", "earthquake", "disaster"]):
         return "Disaster"
-    elif any(k in text for k in ["aid", "refugee", "humanitarian"]):
+    if any(k in text for k in ["aid", "refugee", "humanitarian", "displacement"]):
         return "Humanitarian"
+
     return "Other"
 
 
 def sentiment(text):
     text = str(text).lower()
 
-    negative = ["death", "crisis", "shortage", "violence"]
-    positive = ["aid", "support", "recovery"]
+    negative = ["death", "crisis", "shortage", "violence", "attack", "war"]
+    positive = ["aid", "support", "recovery", "vaccination"]
 
     if any(k in text for k in negative):
         return "Negative"
-    elif any(k in text for k in positive):
+    if any(k in text for k in positive):
         return "Positive"
+
     return "Neutral"
 
 
-df["category"] = df["description"].apply(classify)
-df["sentiment"] = df["description"].apply(sentiment)
+def detect_countries(text):
+    doc = nlp(str(text))
+    detected = set()
 
-df.to_csv("msf_articles.csv", index=False)
-df.to_json("msf_articles.json", orient="records", indent=2)
+    for ent in doc.ents:
+        if ent.label_ == "GPE":
+            name = ent.text.strip()
 
-df.head()
+            if name in COUNTRY_ALIASES:
+                detected.add(COUNTRY_ALIASES[name])
+            elif name in MSF_COUNTRIES:
+                detected.add(name)
+            else:
+                try:
+                    country = pycountry.countries.lookup(name)
+                    if country.name in MSF_COUNTRIES:
+                        detected.add(country.name)
+                except LookupError:
+                    pass
+
+    return sorted(detected)
+
+
+df["detected_countries"] = df["text"].apply(detect_countries)
+df["category"] = df["text"].apply(classify)
+df["sentiment"] = df["text"].apply(sentiment)
+
+df = df[df["detected_countries"].apply(len) > 0].copy()
+
+output_cols = [
+    "source",
+    "author",
+    "title",
+    "description",
+    "url",
+    "publishedAt",
+    "detected_countries",
+    "category",
+    "sentiment",
+]
+
+df[output_cols].to_csv("msf_articles.csv", index=False)
+df[output_cols].to_json("msf_articles.json", orient="records", indent=2)
+
+df[output_cols].head()
