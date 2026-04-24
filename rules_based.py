@@ -7,9 +7,10 @@ from datetime import datetime, timedelta
 import spacy
 import pycountry
 
+from nocommit import NEWSAPI_KEY
+
 nlp = spacy.load("en_core_web_sm")
 
-API_KEY = "YOUR_API_KEY"
 BASE_URL = "https://newsapi.org/v2/everything"
 
 MSF_COUNTRIES = {
@@ -34,18 +35,20 @@ OR refugee OR displacement OR conflict OR war OR violence OR crisis)
 """
 
 params = {
-    "q": query,
+    "q": query.strip(),
     "language": "en",
     "sortBy": "publishedAt",
     "from": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
-    "apiKey": API_KEY,
-    "pageSize": 50,
+    "apiKey": NEWSAPI_KEY,
+    "pageSize": 100,
 }
 
 response = requests.get(BASE_URL, params=params)
 response.raise_for_status()
 
 articles = response.json().get("articles", [])
+    
+print(len(articles))
 
 df = pd.DataFrame(articles)
 
