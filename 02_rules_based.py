@@ -1,46 +1,85 @@
-import requests
+# !pip install pandas spacy pycountry
+# !python -m spacy download en_core_web_sm
+
 import pandas as pd
-from datetime import datetime, timedelta
+import spacy
+import pycountry
 
-from nocommit import NEWSAPI_KEY
+nlp = spacy.load("en_core_web_sm")
 
-BASE_URL = "https://newsapi.org/v2/everything"
-
-query = """
-(humanitarian OR medical OR hospital OR disease OR outbreak OR vaccine OR malnutrition
-OR refugee OR displacement OR conflict OR war OR violence OR crisis)
-"""
-
-params = {
-    "q": query.strip(),
-    "language": "en",
-    "sortBy": "publishedAt",
-    "from": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
-    "apiKey": NEWSAPI_KEY,
-    "pageSize": 100,
+MSF_COUNTRIES = {
+    "Afghanistan", "Bangladesh", "Burundi", "Central African Republic",
+    "Chad", "Democratic Republic of the Congo", "Ethiopia",
+    "Haiti", "Iraq", "Lebanon", "Mali", "Myanmar", "Niger", "Nigeria",
+    "Palestine", "Somalia", "South Sudan", "Sudan", "Syria", "Ukraine",
+    "Yemen"
 }
 
-response = requests.get(BASE_URL, params=params)
-response.raise_for_status()
+COUNTRY_ALIASES = {
+    "DR Congo": "Democratic Republic of the Congo",
+    "DRC": "Democratic Republic of the Congo",
+    "Congo": "Democratic Republic of the Congo",
+    "Gaza": "Palestine",
+    "West Bank": "Palestine",
+}
 
-articles = response.json().get("articles", [])
+# --- Load data ---
+df = pd.read_csv("input_data.csv")
 
-df = pd.DataFrame(articles)
+# --- NOTE: classification and sentiment are already computed upstream ---
+# We only perform country detection + filtering here
 
-df = df[[
+# --- Build text (needed for country detection) ---
+df["text"] = df["title"].fillna("") + " " + df["description"].fillna("")
+
+# --- Country detection ---
+def detect_countries(text):
+    doc = nlp(str(text))
+    detected = set()
+
+    for ent in doc.ents:
+        if ent.label_ == "GPE":
+            name = ent.text.strip()
+
+            if name in COUNTRY_ALIASES:
+                detected.add(COUNTRY_ALIASES[name])
+            elif name in MSF_COUNTRIES:
+                detected.add(name)
+            else:
+                try:
+                    country = pycountry.countries.lookup(name)
+                    if country.name in MSF_COUNTRIES:
+                        detected.add(country.name)
+                except LookupError:
+                    pass
+
+    return sorted(detected)
+
+df["detected_countries"] = df["text"].apply(detect_countries)
+
+# --- Filter relevant countries ---
+df = df[df["detected_countries"].apply(len) > 0].copy()
+
+# --- Quick sanity check (printed once) ---
+print("Category distribution:")
+print(df["category"].value_counts(), "\n")
+
+print("Sentiment distribution:")
+print(df["sentiment"].value_counts(), "\n")
+
+output_cols = [
     "source",
     "author",
     "title",
     "description",
     "url",
     "publishedAt",
-    "content",
-]].copy()
+    "detected_countries",
+    "category",
+    "sentiment",
+]
 
-df["source"] = df["source"].apply(
-    lambda x: x["name"] if isinstance(x, dict) else x
-)
+df[output_cols].to_csv("msf_articles.csv", index=False)
+df[output_cols].to_json("msf_articles.json", orient="records", indent=2)
 
-df.to_csv("input_data.csv", index=False)
-
-print(f"Saved {len(df)} articles to input_data.csv")
+df[output_cols].head()
